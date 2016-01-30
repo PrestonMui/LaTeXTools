@@ -67,7 +67,7 @@
         	{ "trigger": "int", "contents": "infty"},
         	{ "trigger": "infty", "contents": "int"},
 
-		{ "trigger": "su", "contents": "\\sum"},
+		{ "trigger": "su", "contents": "\\sum_{$1}^{$2}"},
 		{ "trigger": "sum", "contents": "sup"},
 		{ "trigger": "sup", "contents": "succ"},
 		{ "trigger": "succ", "contents": "succeq"},
