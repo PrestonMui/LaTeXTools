@@ -4,8 +4,10 @@ import sublime
 if sublime.version() < '3000':
 	# we are on ST2 and Python 2.X
 	_ST3 = False
+	from latextools_utils.is_tex_file import get_tex_extensions
 else:
 	_ST3 = True
+	from .latextools_utils.is_tex_file import get_tex_extensions
 
 
 import os.path, re
@@ -46,7 +48,7 @@ def get_tex_root(view):
 	else:
 		# This works on ST2 and ST3, but does not automatically convert line endings.
 		# We should be OK though.
-		lines = codecs.open(texFile, "r", "UTF-8")
+		lines = codecs.open(texFile, "r", "UTF-8", "ignore")
 		is_file = True
 
 	for line in lines:
@@ -54,7 +56,8 @@ def get_tex_root(view):
 			break
 		else:
 			# We have a comment match; check for a TEX root match
-			mroot = re.match(r"%\s*!TEX\s+root *= *(.*(tex|TEX))\s*$",line)
+			tex_exts = '|'.join([re.escape(ext) for ext in get_tex_extensions()])
+			mroot = re.match(r"(?i)%\s*!TEX\s+root *= *(.*({0}))\s*$".format(tex_exts), line)
 			if mroot:
 				# we have a TEX root match 
 				# Break the match into path, file and extension
