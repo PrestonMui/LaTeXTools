@@ -103,7 +103,8 @@
 		{ "trigger": "longleftrightarrow", "contents": "longleftrightarrow"}, 
 		{ "trigger": "Longleftrightarrow", "contents": "Longleftrightarrow"}, 
                 { "trigger": "up", "contents": "\\uparrow"},
-		{ "trigger": "do", "contents": "\\downarrow"},
+                { "trigger": "do", "contents": "\\downarrow"},
+		{ "trigger": "xra", "contents": "\\xrightarrow{$1}$0"},
 
                 { "trigger": "it", "contents": "\\mathit{$1}$0"},
                 { "trigger": "bf", "contents": "\\mathbf{$1}$0"},
@@ -111,8 +112,10 @@
                 { "trigger": "rm", "contents": "\\mathrm{$1}$0"},
                 { "trigger": "sf", "contents": "\\mathsf{$1}$0"},
                 { "trigger": "scr", "contents": "\\mathscr{$1}$0"},
+                { "trigger": "hat", "contents": "\\hat{$1}$0"},
                 { "trigger": "cal", "contents": "\\mathcal"},
                 { "trigger": "mathcal", "contents": "mathcal{$1}$0"},
+                { "trigger": "bar", "contents": "\\bar{$1}$0"},              
 
                 { "trigger": "lp", "contents": "\\left( $1 \\right) $0"},
                 { "trigger": "lb", "contents": "\\left[ $1 \\right] $0"},
@@ -126,8 +129,9 @@
                 { "trigger": "fr", "contents": "\\frac"},
                 { "trigger": "fra", "contents": "\\frac{$1}{$2}$0"},
                 { "trigger": "stack", "contents": "\\stackrel{$1}{$2}$0"},
+                { "trigger": "chk", "contents": "\\check{$1}$0"},
 
-                { "trigger": "sp", "contents": "\\begin{split}\n$0\n\\end{split}\n"}
+                { "trigger": "sp", "contents": "\\begin{split}\n$0\n\\end{split}\n"},
 
         ]
 }
