@@ -1,4 +1,4 @@
-# ST2/ST3 compat
+	# ST2/ST3 compat
 from __future__ import print_function
 
 import sublime
@@ -12,7 +12,13 @@ if sublime.version() < '3000':
 		_classname_to_internal_name
 	)
 	from latextools_utils.is_tex_file import is_tex_file
-	from latextools_utils import get_setting, parse_tex_directives
+	from latextools_utils import get_setting
+	from latextools_utils.tex_directives import parse_tex_directives
+	from latextools_utils.output_directory import (
+		get_aux_directory, get_output_directory, get_jobname
+	)
+	from latextools_utils.progress_indicator import ProgressIndicator
+	from latextools_utils.utils import run_on_main_thread
 
 	strbase = basestring
 else:
@@ -24,21 +30,35 @@ else:
 		_classname_to_internal_name
 	)
 	from .latextools_utils.is_tex_file import is_tex_file
-	from .latextools_utils import get_setting, parse_tex_directives
+	from .latextools_utils import get_setting
+	from .latextools_utils.tex_directives import parse_tex_directives
+	from .latextools_utils.output_directory import (
+		get_aux_directory, get_output_directory, get_jobname
+	)
+	from .latextools_utils.progress_indicator import ProgressIndicator
+	from .latextools_utils.utils import run_on_main_thread
 
 	strbase = str
+	long = int
 
 import sublime_plugin
 import sys
-import os, os.path
+import os
 import signal
 import threading
 import functools
 import subprocess
 import types
 import traceback
+import shutil
+import re
 
 DEBUG = False
+
+_HAS_PHANTOMS = sublime.version() >= "3118"
+
+if _HAS_PHANTOMS:
+	import html
 
 # Compile current .tex file to pdf
 # Allow custom scripts and build engines!
@@ -119,30 +139,38 @@ class CmdThread ( threading.Thread ):
 					# Now create a Popen object
 					try:
 						if self.caller.plat == "windows":
-							proc = subprocess.Popen(cmd, startupinfo=startupinfo, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
-						elif self.caller.plat == "osx":
-							# Temporary (?) fix for Yosemite: pass environment
 							proc = subprocess.Popen(
 								cmd,
+								startupinfo=startupinfo,
 								stderr=subprocess.STDOUT,
-								stdout=subprocess.PIPE, 
-								env=os.environ,
-								preexec_fn=os.setsid
+								stdout=subprocess.PIPE,
+								cwd=self.caller.tex_dir
 							)
-						else: # Must be linux
+						elif self.caller.plat == "osx":
 							proc = subprocess.Popen(
 								cmd,
 								stderr=subprocess.STDOUT,
 								stdout=subprocess.PIPE,
-								preexec_fn=os.setsid
+								env=os.environ,
+								preexec_fn=os.setsid,
+								cwd=self.caller.tex_dir
+							)
+						else:  # Must be linux
+							proc = subprocess.Popen(
+								cmd,
+								stderr=subprocess.STDOUT,
+								stdout=subprocess.PIPE,
+								preexec_fn=os.setsid,
+								cwd=self.caller.tex_dir
 							)
 					except:
+						self.caller.show_output_panel()
 						self.caller.output("\n\nCOULD NOT COMPILE!\n\n")
 						self.caller.output("Attempted command:")
 						self.caller.output(" ".join(cmd))
 						self.caller.output("\nBuild engine: " + self.caller.builder.name)
 						self.caller.proc = None
-						print(traceback.format_exc())
+						traceback.print_exc()
 						return
 				# Abundance of caution / for possible future extensions:
 				elif isinstance(cmd, subprocess.Popen):
@@ -176,10 +204,11 @@ class CmdThread ( threading.Thread ):
 				# At this point, out contains the output from the current command;
 				# we pass it to the cmd_iterator and get the next command, until completion
 		except:
+			self.caller.show_output_panel()
 			self.caller.output("\n\nCOULD NOT COMPILE!\n\n")
 			self.caller.output("\nBuild engine: " + self.caller.builder.name)
 			self.caller.proc = None
-			print(traceback.format_exc())
+			traceback.print_exc()
 			return
 		finally:
 			# restore environment
@@ -191,32 +220,95 @@ class CmdThread ( threading.Thread ):
 		# Clean up
 		cmd_iterator.close()
 
-		# CHANGED 12-10-27. OK, here's the deal. We must open in binary mode on Windows
-		# because silly MiKTeX inserts ASCII control characters in over/underfull warnings.
-		# In particular it inserts EOFs, which stop reading altogether; reading in binary
-		# prevents that. However, that's not the whole story: if a FS character is encountered,
-		# AND if we invoke splitlines on a STRING, it sadly breaks the line in two. This messes up
-		# line numbers in error reports. If, on the other hand, we invoke splitlines on a
-		# byte array (? whatever read() returns), this does not happen---we only break at \n, etc.
-		# However, we must still decode the resulting lines using the relevant encoding.
-		# 121101 -- moved splitting and decoding logic to parseTeXlog, where it belongs.
-		
-		# Note to self: need to think whether we don't want to codecs.open this, too...
-		# Also, we may want to move part of this logic to the builder...
 		try:
-			data = open(self.caller.tex_base + ".log", 'rb').read()		
+			# Here we try to find the log file...
+			# 1. Check the aux_directory if there is one
+			# 2. Check the output_directory if there is one
+			# 3. Assume the log file is in the same folder as the main file
+			log_file_base = self.caller.tex_base + ".log"
+			if self.caller.aux_directory is None:
+				if self.caller.output_directory is None:
+					log_file = os.path.join(
+						self.caller.tex_dir,
+						log_file_base
+					)
+				else:
+					log_file = os.path.join(
+						self.caller.output_directory,
+						log_file_base
+					)
+
+					if not os.path.exists(log_file):
+						log_file = os.path.join(
+							self.caller.tex_dir,
+							log_file_base
+						)
+			else:
+				log_file = os.path.join(
+					self.caller.aux_directory,
+					log_file_base
+				)
+
+				if not os.path.exists(log_file):
+					if (
+						self.caller.output_directory is not None and
+						self.caller.output_directory != self.caller.aux_directory
+					):
+						log_file = os.path.join(
+							self.caller.output_directory,
+							log_file_base
+						)
+
+					if not os.path.exists(log_file):
+						log_file = os.path.join(
+							self.caller.tex_dir,
+							log_file_base
+						)
+
+			# CHANGED 12-10-27. OK, here's the deal. We must open in binary mode
+			# on Windows because silly MiKTeX inserts ASCII control characters in
+			# over/underfull warnings. In particular it inserts EOFs, which
+			# stop reading altogether; reading in binary prevents that. However,
+			# that's not the whole story: if a FS character is encountered,
+			# AND if we invoke splitlines on a STRING, it sadly breaks the line
+			# in two. This messes up line numbers in error reports. If, on the
+			# other hand, we invoke splitlines on a byte array (? whatever read()
+			# returns), this does not happen---we only break at \n, etc.
+			# However, we must still decode the resulting lines using the relevant
+			# encoding.
+
+			# Note to self: need to think whether we don't want to codecs.open
+			# this, too... Also, we may want to move part of this logic to the
+			# builder...
+			with open(log_file, 'rb') as f:
+				data = f.read()
 		except IOError:
-			self.handle_std_outputs(out, err)
+			traceback.print_exc()
+
+			self.caller.show_output_panel()
+
+			content = ['', 'Could not read log file {0}.log'.format(
+				self.caller.tex_base
+			), '']
+			if out is not None:
+				content.extend(['Output from compilation:', '', out.decode('utf-8')])
+			if err is not None:
+				content.extend(['Errors from compilation:', '', err.decode('utf-8')])
+			self.caller.output(content)
+			# if we got here, there shouldn't be a PDF at all
+			self.caller.finish(False)
 		else:
 			errors = []
 			warnings = []
 			badboxes = []
 
 			try:
-				(errors, warnings, badboxes) = parseTeXlog.parse_tex_log(data)
+				(errors, warnings, badboxes) = parseTeXlog.parse_tex_log(
+					data, self.caller.tex_dir
+				)
 				content = [""]
 				if errors:
-					content.append("Errors:") 
+					content.append("Errors:")
 					content.append("")
 					content.extend(errors)
 				else:
@@ -225,39 +317,46 @@ class CmdThread ( threading.Thread ):
 					if errors:
 						content.extend(["", "Warnings:"])
 					else:
-						content[-1] = content[-1] + " Warnings:" 
+						content[-1] = content[-1] + " Warnings:"
 					content.append("")
 					content.extend(warnings)
 				else:
-					content.append("")
+					if errors:
+						content.append("")
+						content.append("No warnings.")
+					else:
+						content[-1] = content[-1] + " No warnings."
 
 				if badboxes and self.caller.display_bad_boxes:
 					if warnings or errors:
 						content.extend(["", "Bad Boxes:"])
 					else:
-						content[-2] = content[-2] + " Bad Boxes:"
+						content[-1] = content[-1] + " Bad Boxes:"
 					content.append("")
 					content.extend(badboxes)
 				else:
-					if warnings:
-						content.append("")
+					if self.caller.display_bad_boxes:
+						if errors or warnings:
+							content.append("")
+							content.append("No bad boxes.")
+						else:
+							content[-1] = content[-1] + " No bad boxes."
 
-				hide_panel = {
-					"always": True,
-					"no_errors": not errors,
-					"no_warnings": not errors and not warnings,
-					"no_badboxes": not errors and not warnings and \
-						(not self.caller.display_bad_boxes or not badboxes),
-					"never": False
-				}.get(self.caller.hide_panel_level, False)
+				show_panel = {
+					"always": False,
+					"no_errors": bool(errors),
+					"no_warnings": bool(errors or warnings),
+					"no_badboxes": bool(
+						errors or warnings or
+						(self.caller.display_bad_boxes and badboxes)),
+					"never": True
+				}.get(self.caller.hide_panel_level, bool(errors or warnings))
 
-				if hide_panel:
-					# hide the build panel (ST2 api is not thread save)
-					if _ST3:
-						self.caller.window.run_command("hide_panel", {"panel": "output.exec"})
-					else:
-						sublime.set_timeout(lambda: self.caller.window.run_command("hide_panel", {"panel": "output.exec"}), 10)
-					message = "build completed"
+				if show_panel:
+					self.caller.progress_indicator.success_message = "Build completed"
+					self.caller.show_output_panel(force=True)
+				else:
+					message = "Build completed"
 					if errors:
 						message += " with errors"
 					if warnings:
@@ -274,46 +373,71 @@ class CmdThread ( threading.Thread ):
 							message += " and"
 						else:
 							message += " with"
-						message += "bad boxes"
+						message += " bad boxes"
 
-					if _ST3:
-						sublime.status_message(message)
-					else:
-						sublime.set_timeout(lambda: sublime.status_message(message), 10)
+					self.caller.progress_indicator.success_message = message
 			except Exception as e:
-				content=["",""]
-				content.append("LaTeXtools could not parse the TeX log file")
+				self.caller.show_output_panel()
+				content = ["", ""]
+				content.append(
+					"LaTeXTools could not parse the TeX log file {0}".format(
+						log_file
+					)
+				)
 				content.append("(actually, we never should have gotten here)")
 				content.append("")
-				content.append("Python exception: " + repr(e))
+				content.append("Python exception: {0!r}".format(e))
 				content.append("")
-				content.append("Please let me know on GitHub. Thanks!")
+				content.append(
+					"The full error description can be found on the console."
+				)
+				content.append("Please let us know on GitHub. Thanks!")
+
+				traceback.print_exc()
 
 			self.caller.output(content)
 			self.caller.output("\n\n[Done!]\n")
-			self.caller.finish(len(errors) == 0)
 
-	def handle_std_outputs(self, out, err):
-		content = ['']
-		if out is not None:
-			content.extend(['Output from compilation:', '', out.decode('utf-8')])
-		if err is not None:
-			content.extend(['Errors from compilation:', '', err.decode('utf-8')])
-		self.caller.output(content)
-		# if we got here, there shouldn't be a PDF at all
-		self.caller.finish(False)
+			if _HAS_PHANTOMS:
+				self.caller.errors = locals().get("errors", [])
+				self.caller.warnings = locals().get("warnings", [])
+				self.caller.badboxes = locals().get("badboxes", [])
+
+			self.caller.finish(len(errors) == 0)
 
 # Actual Command
 
 class make_pdfCommand(sublime_plugin.WindowCommand):
+
+	errs_by_file = {}
+	phantom_sets_by_buffer = {}
+	show_errors_inline = True
+	errors = []
+	warnings = []
+	badboxes = []
+
 
 	def __init__(self, *args, **kwargs):
 		sublime_plugin.WindowCommand.__init__(self, *args, **kwargs)
 		self.proc = None
 		self.proc_lock = threading.Lock()
 
-	def run(self, cmd="", file_regex="", path=""):
-		
+	def run(self,
+			cmd="",
+			file_regex="",
+			path="",
+			update_phantoms_only=False,
+			hide_phantoms_only=False):
+
+		if update_phantoms_only:
+			if self.show_errors_inline:
+				self.update_phantoms()
+			return
+
+		if hide_phantoms_only:
+			self.hide_phantoms()
+			return
+
 		# Try to handle killing
 		with self.proc_lock:
 			if self.proc: # if we are running, try to kill running process
@@ -335,6 +459,11 @@ class make_pdfCommand(sublime_plugin.WindowCommand):
 
 		view = self.view = self.window.active_view()
 
+		if _HAS_PHANTOMS:
+			self.hide_phantoms()
+			pref_settings = sublime.load_settings("Preferences.sublime-settings")
+			self.show_errors_inline = pref_settings.get("show_errors_inline", True)
+
 		if view.is_dirty():
 			print ("saving...")
 			view.run_command('save')  # call this on view, not self.window
@@ -348,8 +477,8 @@ class make_pdfCommand(sublime_plugin.WindowCommand):
 			sublime.error_message(self.file_name + ": file not found.")
 			return
 
-		self.tex_base, self.tex_ext = os.path.splitext(self.file_name)
-		tex_dir = os.path.dirname(self.file_name)
+		self.tex_base = get_jobname(view)
+		self.tex_dir = os.path.dirname(self.file_name)
 
 		if not is_tex_file(self.file_name):
 			sublime.error_message("%s is not a TeX source file: cannot compile." % (os.path.basename(view.file_name()),))
@@ -357,19 +486,34 @@ class make_pdfCommand(sublime_plugin.WindowCommand):
 
 		# Output panel: from exec.py
 		if not hasattr(self, 'output_view'):
-			self.output_view = self.window.get_output_panel("exec")
+			self.output_view = self.window.get_output_panel("latextools")
+
+		output_view_settings = self.output_view.settings()
+		output_view_settings.set("result_file_regex", file_regex)
+		output_view_settings.set("result_base_dir", self.tex_dir)
+		output_view_settings.set("line_numbers", False)
+		output_view_settings.set("gutter", False)
+		output_view_settings.set("scroll_past_end", False)
+
+		if get_setting("highlight_build_panel", True):
+			self.output_view.set_syntax_file(
+				"Packages/LaTeXTools/LaTeXTools Console.hidden-tmLanguage"
+			)
+			output_view_settings.set(
+				"color_scheme",
+				sublime.load_settings('Preferences.sublime-settings').
+				get('color_scheme')
+			)
+
+		self.output_view.set_read_only(True)
 
 		# Dumb, but required for the moment for the output panel to be picked
-        # up as the result buffer
-		self.window.get_output_panel("exec")
+		# up as the result buffer
+		self.window.get_output_panel("latextools")
 
-		self.output_view.settings().set("result_file_regex", "^([^:\n\r]*):([0-9]+):?([0-9]+)?:? (.*)$")
-		# self.output_view.settings().set("result_line_regex", line_regex)
-		self.output_view.settings().set("result_base_dir", tex_dir)
-
-		self.window.run_command("show_panel", {"panel": "output.exec"})
-
-		self.output_view.settings().set("result_file_regex", file_regex)
+		self.hide_panel_level = get_setting("hide_build_panel", "no_warnings")
+		if self.hide_panel_level == "never":
+			self.show_output_panel(force=True)
 
 		self.plat = sublime.platform()
 		if self.plat == "osx":
@@ -385,12 +529,15 @@ class make_pdfCommand(sublime_plugin.WindowCommand):
 		# Get platform settings, builder, and builder settings
 		platform_settings  = get_setting(self.plat, {})
 		builder_name = get_setting("builder", "traditional")
-		self.hide_panel_level = get_setting("hide_build_panel", "never")
 		self.display_bad_boxes = get_setting("display_bad_boxes", False)
 		# This *must* exist, so if it doesn't, the user didn't migrate
 		if builder_name is None:
-			sublime.error_message("LaTeXTools: you need to migrate your preferences. See the README file for instructions.")
-			self.window.run_command('hide_panel', {"panel": "output.exec"})
+			sublime.error_message(
+				"LaTeXTools: you need to migrate your preferences. See the README file for instructions."
+			)
+			self.window.run_command(
+				'hide_panel', {"panel": "output.latextools"}
+			)
 			return
 
 		# Default to 'traditional' builder
@@ -429,6 +576,17 @@ class make_pdfCommand(sublime_plugin.WindowCommand):
 		if 'options' in tex_directives:
 			options.extend(tex_directives['options'])
 
+		# filter out --aux-directory and --output-directory options which are
+		# handled separately
+		options = [opt for opt in options if (
+			not opt.startswith('--aux-directory') and
+			not opt.startswith('--output-directory') and
+			not opt.startswith('--jobname')
+		)]
+
+		self.aux_directory = get_aux_directory(self.file_name)
+		self.output_directory = get_output_directory(self.file_name)
+
 		# Read the env option (platform specific)
 		builder_platform_settings = builder_settings.get(self.plat)
 		if builder_platform_settings:
@@ -441,7 +599,7 @@ class make_pdfCommand(sublime_plugin.WindowCommand):
 
 		# Safety check: if we are using a built-in builder, disregard
 		# builder_path, even if it was specified in the pref file
-		if builder_name in ['simple', 'traditional', 'script']:
+		if builder_name in ['simple', 'traditional', 'script', 'basic']:
 			builder_path = None
 
 		if builder_path:
@@ -453,7 +611,7 @@ class make_pdfCommand(sublime_plugin.WindowCommand):
 		except NoSuchPluginException:
 			sublime.error_message("Cannot find builder " + builder_name + ".\n" \
 							      "Check your LaTeXTools Preferences")
-			self.window.run_command('hide_panel', {"panel": "output.exec"})
+			self.window.run_command('hide_panel', {"panel": "output.latextools"})
 			return
 
 		print(repr(builder))
@@ -462,6 +620,9 @@ class make_pdfCommand(sublime_plugin.WindowCommand):
 			self.output,
 			engine,
 			options,
+			self.aux_directory,
+			self.output_directory,
+			self.tex_base,
 			tex_directives,
 			builder_settings,
 			platform_settings
@@ -470,9 +631,19 @@ class make_pdfCommand(sublime_plugin.WindowCommand):
 		# Now get the tex binary path from prefs, change directory to
 		# that of the tex root file, and run!
 		self.path = platform_settings['texpath']
-		os.chdir(tex_dir)
-		CmdThread(self).start()
+		thread = CmdThread(self)
+		thread.start()
 		print(threading.active_count())
+
+		# setup the progress indicator
+		display_message_length = long(
+			get_setting('build_finished_message_length', 2.0) * 1000
+		)
+		# NB CmdThread will change the success message
+		self.progress_indicator = ProgressIndicator(
+			thread, 'Building', 'Build failed',
+			display_message_length=display_message_length
+		)
 
 
 	# Threading headaches :-)
@@ -519,7 +690,15 @@ class make_pdfCommand(sublime_plugin.WindowCommand):
 		# if selection_was_at_end:
 		#     self.output_view.show(self.output_view.size())
 		# self.output_view.end_edit(edit)
-		self.output_view.set_read_only(True)	
+		self.output_view.set_read_only(True)
+
+	def show_output_panel(self, force=False):
+		if force or self.hide_panel_level != 'always':
+			f = functools.partial(
+				self.window.run_command,
+				"show_panel", {"panel": "output.latextools"}
+			)
+			run_on_main_thread(f, default_value=None)
 
 	# Also from exec.py
 	# Set the selection to the start of the output panel, so next_result works
@@ -529,16 +708,156 @@ class make_pdfCommand(sublime_plugin.WindowCommand):
 		sublime.set_timeout(functools.partial(self.do_finish, can_switch_to_pdf), 0)
 
 	def do_finish(self, can_switch_to_pdf):
-		# Move to TextCommand for compatibility with ST3
-		# edit = self.output_view.begin_edit()
-		# self.output_view.sel().clear()
-		# reg = sublime.Region(0)
-		# self.output_view.sel().add(reg)
-		# self.output_view.show(reg) # scroll to top
-		# self.output_view.end_edit(edit)
 		self.output_view.run_command("do_finish_edit")
+
+		if _HAS_PHANTOMS and self.show_errors_inline:
+			self.create_errs_by_file()
+			self.update_phantoms()
+
+		# can_switch_to_pdf indicates a pdf should've been created
 		if can_switch_to_pdf:
-			self.view.run_command("jump_to_pdf", {"from_keybinding": False})
+			# if using output_directory, follow the copy_output_on_build setting
+			# files are copied to the same directory as the main tex file
+			if self.output_directory is not None:
+				copy_on_build = get_setting('copy_output_on_build', True) or True
+				if copy_on_build is True:
+					shutil.copy2(
+						os.path.join(
+							self.output_directory,
+							self.tex_base + u'.pdf'
+						),
+						os.path.dirname(self.file_name)
+					)
+				elif isinstance(copy_on_build, list):
+					for ext in copy_on_build:
+						shutil.copy2(
+							os.path.join(
+								self.output_directory,
+								self.tex_base + ext
+							),
+							os.path.dirname(self.file_name)
+						)
+
+			if get_setting('open_pdf_on_build', True):
+				self.view.run_command("jump_to_pdf", {"from_keybinding": False})
+
+	if _HAS_PHANTOMS:
+		def _find_errors(self, errors, error_class):
+			for line in errors:
+				m = self.file_regex.search(line)
+				if not m:
+					continue
+				groups = m.groups()
+				if len(groups) == 4:
+					file, line, column, text = groups
+				else:
+					continue
+				if line is None:
+					continue
+				line = int(line)
+				column = int(column) if column else 0
+				if file not in self.errs_by_file:
+					self.errs_by_file[file] = []
+				self.errs_by_file[file].append((line, column, text, error_class))
+
+		def create_errs_by_file(self):
+			file_regex = self.output_view.settings().get("result_file_regex")
+			if not file_regex:
+				return
+			self.errs_by_file = {}
+			try:
+				self.file_regex = re.compile(file_regex, re.MULTILINE)
+			except:
+				print("Cannot compile file regex.")
+				return
+			lt_settings = sublime.load_settings("LaTeXTools.sublime-settings")
+			level_name = lt_settings.get("show_error_phantoms")
+			level = {
+				"none": 0,
+				"errors": 1,
+				"warnings": 2,
+				"badboxes": 3
+			}.get(level_name, 2)
+
+			if level >= 1:
+				self._find_errors(self.errors, "error")
+			if level >= 2:
+				self._find_errors(self.warnings, "warning")
+			if level >= 3:
+				self._find_errors(self.badboxes, "warning badbox")
+
+		def update_phantoms(self):
+			stylesheet = """
+				<style>
+					div.lt-error {
+						padding: 0.4rem 0 0.4rem 0.7rem;
+						margin: 0.2rem 0;
+						border-radius: 2px;
+					}
+					div.lt-error span.message {
+						padding-right: 0.7rem;
+					}
+					div.lt-error a {
+						text-decoration: inherit;
+						padding: 0.35rem 0.7rem 0.45rem 0.8rem;
+						position: relative;
+						bottom: 0.05rem;
+						border-radius: 0 2px 2px 0;
+						font-weight: bold;
+					}
+					html.dark div.lt-error a {
+						background-color: #00000018;
+					}
+					html.light div.lt-error a {
+						background-color: #ffffff18;
+					}
+				</style>
+			"""
+
+			for file, errs in self.errs_by_file.items():
+				view = self.window.find_open_file(file)
+				if view:
+
+					buffer_id = view.buffer_id()
+					if buffer_id not in self.phantom_sets_by_buffer:
+						phantom_set = sublime.PhantomSet(view, "lt_exec")
+						self.phantom_sets_by_buffer[buffer_id] = phantom_set
+					else:
+						phantom_set = self.phantom_sets_by_buffer[buffer_id]
+
+					phantoms = []
+
+					for line, column, text, error_class in errs:
+						pt = view.text_point(line - 1, column - 1)
+						html_text = html.escape(text, quote=False)
+						phantom_content = """
+							<body id="inline-error">
+								{stylesheet} 
+								<div class="lt-error {error_class}">
+									<span class="message">{html_text}</span>
+									<a href="hide">{cancel_char}</a>
+								</div>
+							</body>
+						""".format(cancel_char=chr(0x00D7), **locals())
+						phantoms.append(sublime.Phantom(
+							sublime.Region(pt, view.line(pt).b),
+							phantom_content, sublime.LAYOUT_BELOW,
+							on_navigate=self.on_phantom_navigate))
+
+					phantom_set.update(phantoms)
+
+		def hide_phantoms(self):
+			for file, errs in self.errs_by_file.items():
+				view = self.window.find_open_file(file)
+				if view:
+					view.erase_phantoms("lt_exec")
+
+			self.errs_by_file = {}
+			self.phantom_sets_by_buffer = {}
+			self.show_errors_inline = False
+
+		def on_phantom_navigate(self, href):
+			self.hide_phantoms()
 
 
 class DoOutputEditCommand(sublime_plugin.TextCommand):
@@ -553,6 +872,16 @@ class DoFinishEditCommand(sublime_plugin.TextCommand):
         reg = sublime.Region(0)
         self.view.sel().add(reg)
         self.view.show(reg)
+
+if _HAS_PHANTOMS:
+	class BuildPhantomEventListener(sublime_plugin.EventListener):
+		def on_load(self, view):
+			if not view.score_selector(0, "text.tex"):
+				return
+			w = view.window()
+			if w is not None:
+				w.run_command("make_pdf", {"update_phantoms_only": True})
+
 
 def plugin_loaded():
 	# load the plugins from the builders dir

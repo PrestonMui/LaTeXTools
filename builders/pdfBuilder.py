@@ -38,8 +38,9 @@ class PdfBuilder(latextools_plugin.LaTeXToolsPlugin):
 	# Your __init__ method *must* call this (via super) to ensure that
 	# tex_root is properly split into the root tex file's directory,
 	# its base name, and extension, etc.
-	def __init__(self, tex_root, output, engine, options,
-				 tex_directives, builder_settings, platform_settings):
+	def __init__(self, tex_root, output, engine, options, aux_directory,
+				 output_directory, job_name, tex_directives,
+				 builder_settings, platform_settings):
 		self.tex_root = tex_root
 		self.tex_dir, self.tex_name = os.path.split(tex_root)
 		self.base_name, self.tex_ext = os.path.splitext(self.tex_name)
@@ -47,9 +48,32 @@ class PdfBuilder(latextools_plugin.LaTeXToolsPlugin):
 		self.out = ""
 		self.engine = engine
 		self.options = options
+		self.output_directory = self.output_directory_full = output_directory
+		self.aux_directory = self.aux_directory_full = aux_directory
+		self.job_name = job_name
 		self.tex_directives = tex_directives
 		self.builder_settings = builder_settings
 		self.platform_settings = platform_settings
+
+		# if output_directory and aux_directory can be specified as a path
+		# relative to self.tex_dir, we use that instead of the absolute path
+		# note that the full path for both is available as
+		# self.output_directory_full and self.aux_directory_full
+		if (
+			self.output_directory and
+			self.output_directory.startswith(self.tex_dir)
+		):
+			self.output_directory = os.path.relpath(
+				self.output_directory, self.tex_dir
+			)
+
+		if (
+			self.aux_directory and
+			self.aux_directory.startswith(self.tex_dir)
+		):
+			self.aux_directory = os.path.relpath(
+				self.aux_directory, self.tex_dir
+			)
 
 	# Send to callable object
 	# Usually no need to override
