@@ -1,9 +1,14 @@
 # ST2/ST3 compat
 from __future__ import print_function 
 import sublime
-import sys
+import sublime_plugin
+
+import os
+import traceback
+import re
+
 if sublime.version() < '3000':
-    # we are on ST2 and Python 2.X
+	# we are on ST2 and Python 2.X
 	_ST3 = False
 	import getTeXRoot
 	from latextools_utils.is_tex_file import is_tex_file
@@ -11,7 +16,7 @@ if sublime.version() < '3000':
 	from latextools_utils.output_directory import (
 		get_output_directory, get_jobname
 	)
-	from latextools_utils.sublime_utils import get_sublime_exe
+	from latextools_utils.sublime_utils import focus_st
 	from latextools_plugin import (
 		get_plugin, add_plugin_path, NoSuchPluginException,
 		add_whitelist_module
@@ -24,15 +29,11 @@ else:
 	from .latextools_utils.output_directory import (
 		get_output_directory, get_jobname
 	)
-	from .latextools_utils.sublime_utils import get_sublime_exe
+	from .latextools_utils.sublime_utils import focus_st
 	from .latextools_plugin import (
 		get_plugin, add_plugin_path, NoSuchPluginException,
 		add_whitelist_module
 	)
-
-import sublime_plugin, os.path, subprocess, time
-import traceback
-import re
 
 SUBLIME_VERSION = re.compile(r'Build (\d{4})', re.UNICODE)
 DEFAULT_VIEWERS = {
@@ -54,69 +55,41 @@ def get_viewer():
 		viewer_name = default_viewer
 
 	if viewer_name is None:
-		sublime.error_message('No viewer could be found for your platform. '
-				'Please configure the "viewer" setting in your LaTeXTools '
-				'Preferences')
+		sublime.error_message(
+			'No viewer could be found for your platform. '
+			'Please configure the "viewer" setting in your LaTeXTools '
+			'Preferences')
 		raise NoViewerException()
 
 	try:
 		viewer = get_plugin(viewer_name + '_viewer')
 	except NoSuchPluginException:
-		sublime.error_message('Cannot find viewer ' + viewer_name + '.\n' +
-								'Please check your LaTeXTools Preferences.')
-		raise NoViewerException()
+		try:
+			viewer = get_plugin(viewer_name)
+		except NoSuchPluginException:
+			sublime.error_message(
+				'Cannot find viewer ' + viewer_name + '.\n' +
+				'Please check your LaTeXTools Preferences.')
+			raise NoViewerException()
 
 	print(repr(viewer))
-	
+
 	# assume no-args constructor
 	viewer = viewer()
 
 	if not viewer.supports_platform(sublime.platform()):
-		sublime.error_message(viewer_name + ' does not support the ' +
-								'current platform. Please change the viewer in ' +
-								'your LaTeXTools Preferences.')
+		sublime.error_message(
+			viewer_name + ' does not support the current platform. '
+			'Please change the viewer in your LaTeXTools Preferences.')
 		raise NoViewerException()
 
 	return viewer
 
 
-def focus_st():
-	sublime_command = get_sublime_exe()
-
-	if sublime_command is not None:
-		platform = sublime.platform()
-		# TODO: this does not work on OSX
-		# and I don't know why...
-		if platform == 'osx':
-			return
-
-		plat_settings = get_setting(platform, {})
-		wait_time = plat_settings.get('keep_focus_delay', 0.5)
-
-		def keep_focus():
-			startupinfo = None
-			shell = False
-			if platform == 'windows':
-				startupinfo = subprocess.STARTUPINFO()
-				startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-				shell = _ST3
-
-			subprocess.Popen(
-				sublime_command,
-				startupinfo=startupinfo,
-				shell=shell,
-				env=os.environ
-			)
-
-		if hasattr(sublime, 'set_async_timeout'):
-			sublime.set_async_timeout(keep_focus, int(wait_time * 1000))
-		else:
-			sublime.set_timeout(keep_focus, int(wait_time * 1000))
-
-
 # Jump to current line in PDF file
 # NOTE: must be called with {"from_keybinding": <boolean>} as arg
 class JumpToPdf(sublime_plugin.TextCommand):
+
 	def is_visible(self, *args):
 		view = sublime.active_window().active_view()
 		return bool(view.score_selector(0, "text.tex"))
@@ -127,26 +100,31 @@ class JumpToPdf(sublime_plugin.TextCommand):
 		forward_sync = args.get('forward_sync', get_setting('forward_sync', True))
 
 		# If invoked from keybinding, we sync
-		# Rationale: if the user invokes the jump command, s/he wants to see the result of the compilation.
-		# If the PDF viewer window is already visible, s/he probably wants to sync, or s/he would have no
-		# need to invoke the command. And if it is not visible, the natural way to just bring up the
-		# window without syncing is by using the system's window management shortcuts.
+		# Rationale: if the user invokes the jump command, s/he wants to see
+		# the result of the compilation.
+		# If the PDF viewer window is already visible, s/he probably wants to
+		# sync, or s/he would have no need to invoke the command. And if it is
+		# not visible, the natural way to just bring up the window without
+		# syncing is by using the system's window management shortcuts.
 		# As for focusing, we honor the toggles / prefs.
 		from_keybinding = args.pop("from_keybinding", False)
 		if from_keybinding:
 			forward_sync = True
-		print (from_keybinding, keep_focus, forward_sync)
+		print(from_keybinding, keep_focus, forward_sync)
 
-		if not is_tex_file(self.view.file_name()):
-			sublime.error_message("%s is not a TeX source file: cannot jump." % (os.path.basename(view.fileName()),))
+		view = self.view
+
+		if not is_tex_file(view.file_name()):
+			sublime.error_message(
+				"%s is not a TeX source file: cannot jump." %
+				(os.path.basename(view.fileName()),))
 			return
 
-		root = getTeXRoot.get_tex_root(self.view)
+		root = getTeXRoot.get_tex_root(view)
 		file_name = get_jobname(root)
 
-		output_directory = get_output_directory(self.view)
+		output_directory = get_output_directory(view)
 		if output_directory is None:
-			root = getTeXRoot.get_tex_root(self.view)
 			pdffile = os.path.join(
 				os.path.dirname(root),
 				file_name + u'.pdf'
@@ -193,18 +171,20 @@ class JumpToPdf(sublime_plugin.TextCommand):
 					viewer.view_file(pdffile, keep_focus=keep_focus)
 				except (AttributeError, NotImplementedError):
 					traceback.print_exc()
-					sublime.error_message('Viewer ' + viewer_name + 
-						' does not appear to be a proper LaTeXTools viewer plugin.' +
-						' Please contact the plugin author.')
+					sublime.error_message(
+						'Your viewer does not appear to be a proper'
+						'LaTeXTools viewer plugin. '
+						'Please contact the plugin author.')
 					return
 		else:
 			try:
 				viewer.view_file(pdffile, keep_focus=keep_focus)
 			except (AttributeError, NotImplementedError):
 				traceback.print_exc()
-				sublime.error_message('Viewer ' + viewer_name + 
-					' does not appear to be a proper LaTeXTools viewer plugin.' +
-					' Please contact the plugin author.')
+				sublime.error_message(
+					'Your viewer does not appear to be a proper'
+					'LaTeXTools viewer plugin. '
+					'Please contact the plugin author.')
 				return
 
 		if keep_focus:
@@ -218,6 +198,7 @@ class JumpToPdf(sublime_plugin.TextCommand):
 
 
 class ViewPdf(sublime_plugin.WindowCommand):
+
 	def is_visible(self, *args):
 		view = self.window.active_view()
 		return bool(view.score_selector(0, "text.tex"))
@@ -279,11 +260,12 @@ class ViewPdf(sublime_plugin.WindowCommand):
 			viewer.view_file(pdffile, keep_focus=False)
 		except (AttributeError, NotImplementedError):
 			traceback.print_exception()
-			sublime.error_message('Viewer ' + viewer_name + 
-					' does not appear to be a proper LaTeXTools viewer plugin.' +
-					' Please contact the plugin author.')
+			sublime.error_message(
+				'Your viewer does not appear to be a proper'
+				'LaTeXTools viewer plugin. '
+				'Please contact the plugin author.')
 			return
-		
+
 
 def plugin_loaded():
 	add_whitelist_module('latextools_utils')
@@ -294,11 +276,6 @@ def plugin_loaded():
 	add_plugin_path(os.path.join(viewers_path, 'base_viewer.py'))
 	add_plugin_path(viewers_path)
 
-	# load any .latextools_viewer files from the Uer directory
-	add_plugin_path(
-		os.path.join(sublime.packages_path(), 'User'),
-		'*.latextools_viewer'
-	)
 
 if not _ST3:
 	plugin_loaded()

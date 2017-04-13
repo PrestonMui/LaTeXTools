@@ -1,13 +1,12 @@
 from base_viewer import BaseViewer
 
 from latextools_utils import get_setting
+from latextools_utils.external_command import external_command
 from latextools_utils.sublime_utils import get_sublime_exe
 
-from copy import copy
 import os
 import re
 import shlex
-import subprocess
 import sublime
 import string
 import sys
@@ -20,19 +19,12 @@ except ImportError:
 if sys.version_info >= (3, 0):
     PY2 = False
     strbase = str
-
-    def get_texpath():
-        platform_settings = get_setting(sublime.platform(), {})
-        texpath = platform_settings.get('texpath', '')
-        return os.path.expandvars(texpath)
 else:
     PY2 = True
     strbase = basestring
 
-    def get_texpath():
-        platform_settings = get_setting(sublime.platform(), {})
-        texpath = platform_settings.get('texpath', '')
-        return os.path.expandvars(texpath).encode(sys.getfilesystemencoding())
+
+WINDOWS_SHELL = re.compile(r'\b(?:cmd|powershell)(?:.exe)?\b', re.UNICODE)
 
 
 # a viewer that runs a user-specified command
@@ -137,20 +129,13 @@ class CommandViewer(BaseViewer):
         if not replaced:
             command.append(pdf_file)
 
-        startupinfo = None
-        if sublime.platform() == 'windows':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-        env = copy(os.environ)
-        env['PATH'] = get_texpath() or env['PATH']
-
-        print('Running {0}'.format(quote(' '.join(command))))
-        subprocess.Popen(
+        external_command(
             command,
-            startupinfo=startupinfo,
-            env=env,
-            cwd=os.path.split(pdf_file)[0]
+            cwd=os.path.split(pdf_file)[0],
+            # show the Window if not using a Windows shell, i.e., powershell or
+            # cmd
+            show_window=not bool(WINDOWS_SHELL.match(command[0]))
+            if sublime.platform() == 'windows' else False
         )
 
     def forward_sync(self, pdf_file, tex_file, line, col, **kwargs):
