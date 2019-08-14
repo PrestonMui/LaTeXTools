@@ -114,7 +114,7 @@
                 { "trigger": "scr", "contents": "\\mathscr{$1}$0"},
                 { "trigger": "hat", "contents": "\\hat{$1}$0"},
                 { "trigger": "til", "contents": "\\tilde{$1}$0"},
-                { "trigger": "cal", "contents": "\\mathcal"},
+                { "trigger": "cal", "contents": "\\mathcal{$1}$0"},
                 { "trigger": "mathcal", "contents": "mathcal{$1}$0"},
                 { "trigger": "bar", "contents": "\\bar{$1}$0"},              
 
