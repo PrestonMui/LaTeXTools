@@ -63,16 +63,7 @@
                 { "trigger": "bcu", "contents": "\\bigcup"},
                 { "trigger": "bca", "contents": "\\bigcap"},
 
-	        { "trigger": "in", "contents": "\\int"},
-        	{ "trigger": "int", "contents": "infty"},
-        	{ "trigger": "infty", "contents": "int"},
-
-		{ "trigger": "su", "contents": "\\sum_{$1}^{$2}"},
-		{ "trigger": "sum", "contents": "sup"},
-		{ "trigger": "sup", "contents": "succ"},
-		{ "trigger": "succ", "contents": "succeq"},
-		{ "trigger": "succeq", "contents": "succcurlyeq"},
-		{ "trigger": "succcurlyeq", "contents": "sum"},
+		{ "trigger": "sum", "contents": "\\sum_{$1}^{$2} $0"},
 
                 { "trigger": "qd", "contents": "\\quad"},
                 { "trigger": "qqd", "contents": "\\qquad"},
@@ -126,6 +117,8 @@
                 { "trigger": "Bigp", "contents": "\\Big( $1 \\Big) $0"},
                 { "trigger": "biggb", "contents": "\\bigg[ $1 \\bigg] $0"},
                 { "trigger": "Bigb", "contents": "\\Big[ $1 \\Big] $0"},
+                
+                { "trigger": "int", "contents": "\\int_{$1}^{$2} $0"},
                 
                 { "trigger": "fr", "contents": "\\frac"},
                 { "trigger": "fra", "contents": "\\frac{$1}{$2}$0"},
